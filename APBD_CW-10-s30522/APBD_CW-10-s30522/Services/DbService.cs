@@ -1,6 +1,7 @@
 ﻿using APBD_CW_10_s30522.Data;
 using APBD_CW_10_s30522.DTOs;
 using APBD_CW_10_s30522.Exceptions;
+using APBD_CW_10_s30522.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace APBD_CW_10_s30522.Services;
@@ -9,6 +10,8 @@ public interface IDbService
 {
     public Task<TripDetailsPagingGetDTO> GetTripsAsync(int page, int pageSize);
     public Task<int> DeleteClientAsync(int idClient);
+    public Task<ClientTripGetDTO> AssignClientToTripWithOptionalClientCreationAsync(
+        ClientAssignmentDTO clientAssignment, int idTrip);
 }
 
 public class DbService(ApbdContext data) : IDbService
@@ -71,5 +74,89 @@ public class DbService(ApbdContext data) : IDbService
             await transaction.RollbackAsync();
             throw;
         }
+    }
+
+    public async Task<ClientTripGetDTO> AssignClientToTripWithOptionalClientCreationAsync(
+        ClientAssignmentDTO clientAssignment, int idTrip)
+    {
+        var trip = await data.Trips.FirstOrDefaultAsync(t => t.IdTrip == idTrip);
+        
+        if (trip == null)
+        {
+            throw new NotFoundException($"Trip of id {idTrip} does not exist");
+        }
+
+        if (trip.DateFrom > DateTime.Now)
+        {
+            throw new ConflictException($"Trip already begun in {trip.DateFrom}");
+        }
+
+        if (data.ClientTrips.Select(ct => ct.IdTrip == idTrip).Count() >= trip.MaxPeople)
+        {
+            throw new ConflictException($"Trip is fully booked");
+        }
+        
+        var client = await data.Clients.FirstOrDefaultAsync(c => c.Pesel == clientAssignment.Pesel);
+
+        if (client != null)
+        {
+            if (client.FirstName != clientAssignment.FirstName || client.LastName != clientAssignment.LastName ||
+                client.Telephone != clientAssignment.Telephone || client.Email != clientAssignment.Email)
+            {
+                throw new ConflictException($"Client data does not match with client in database");    
+            }
+
+            if (await data.ClientTrips.AnyAsync(ct => ct.IdClient == client.IdClient && ct.IdTrip == idTrip))
+            {
+                throw new ConflictException($"Client of id {client.IdClient} has already booked trip of id {idTrip}");
+            }
+        }
+
+        var transaction = await data.Database.BeginTransactionAsync();
+
+        try
+        {
+            if (client == null)
+            {
+                client = new Client
+                {
+                    FirstName = clientAssignment.FirstName,
+                    LastName = clientAssignment.LastName,
+                    Telephone = clientAssignment.Telephone,
+                    Pesel = clientAssignment.Pesel,
+                    Email = clientAssignment.Email
+                };
+
+                await data.Clients.AddAsync(client);
+                await data.SaveChangesAsync();
+            }
+
+            var clientTrip = new ClientTrip
+            {
+                IdClient = client.IdClient,
+                IdClientNavigation = client,
+                IdTrip = idTrip,
+                IdTripNavigation = trip,
+                PaymentDate = clientAssignment.PaymentDate,
+                RegisteredAt = DateTime.Now
+            };
+
+            await data.ClientTrips.AddAsync(clientTrip);
+            await data.SaveChangesAsync();
+            await transaction.CommitAsync();
+            return new ClientTripGetDTO
+            {
+                IdClient = clientTrip.IdClient,
+                IdTrip = clientTrip.IdTrip,
+                PaymentDate = clientTrip.PaymentDate,
+                RegisteredAt = clientTrip.RegisteredAt
+            };
+        }
+        catch (Exception)
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+        
     }
 }
